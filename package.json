@@ -4,15 +4,19 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "axios": "^1.9.0",
     "body-parser": "^1.20.3",
     "dotenv": "^16.4.7",
+    "downloadtiktok": "^3.0.0",
     "express": "^4.21.2",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "ytdl-core": "^4.11.5"
   }
 }

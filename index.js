@@ -1,40 +1,87 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const TelegramBot = require('node-telegram-bot-api');
-const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const ytdl = require('ytdl-core');
+const axios = require('axios');
+const TiktokDownloader = require('downloadtiktok');
+const { pipeline } = require('stream/promises');
 
 const app = express();
 app.use(bodyParser.json());
 
 const TOKEN = '7552419100:AAEih_b7hX4hHoNv_f1iAP-IAoIIOKJTmGE';
-const HEROKU_URL = 'https://e68e-194-88-152-40.ngrok-free.app';
-const webhookPath = '/webhook';
+const HEROKU_URL = 'https://js-video-getter-e5daa3254ae5.herokuapp.com:443';
 
-const bot = new TelegramBot(TOKEN);
+const port = Number(process.env.PORT) || 3000;
+const bot = new TelegramBot(TOKEN, { webHook: { port } });
 
-bot.deleteWebHook()
-  .then(() => bot.setWebHook(`${HEROKU_URL}${webhookPath}`))
-  .then(() => {
-    return bot.getWebHookInfo();
-  })
-  .catch(err => {
-    console.error('Error setting webhook:', err);
+bot.setWebHook(`${HEROKU_URL}/bot${TOKEN}`);
+
+// Function to download YouTube videos
+async function downloadYouTubeVideo(url, outputFile) {
+  return new Promise((resolve, reject) => {
+    ytdl(url, { quality: 'highest' })
+      .pipe(fs.createWriteStream(outputFile))
+      .on('finish', () => resolve(outputFile))
+      .on('error', reject);
   });
+}
 
-app.post(webhookPath, (req, res) => {
+// Function to download TikTok videos
+async function downloadTikTokVideo(url, outputFile) {
   try {
-    bot.processUpdate(req.body);
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Error processing update:", err);
-    res.sendStatus(500);
+    const result = await TiktokDownloader.downloadTiktok(url);
+    const videoList = TiktokDownloader.filterNoWatermark(result.medias);
+    
+    if (videoList && videoList.length > 0) {
+      const bestVideo = videoList[0]; // Get the first no watermark video
+      const videoBuffer = await TiktokDownloader.getBufferFromURL(bestVideo.url);
+      fs.writeFileSync(outputFile, videoBuffer);
+      return outputFile;
+    }
+    throw new Error('No TikTok videos found');
+  } catch (error) {
+    console.error('TikTok download error:', error);
+    throw error;
   }
-});
+}
 
-bot.on('message', (msg) => {
+// Function to download Instagram videos (simplified - needs more implementation)
+async function downloadInstagramVideo(url, outputFile) {
+  try {
+    // This is a simplified approach - Instagram has complex protection mechanisms
+    // You might need to use a more robust library or service
+    // For now, we'll try a basic approach to download direct video links
+    const response = await axios.get(url);
+    const html = response.data;
+    
+    // Try to extract video URL from Instagram page
+    const videoUrlMatch = html.match(/"video_url":"([^"]+)"/);
+    if (videoUrlMatch && videoUrlMatch[1]) {
+      const videoUrl = videoUrlMatch[1].replace(/\\u0026/g, '&');
+      
+      // Download the video
+      const videoResponse = await axios({
+        method: 'GET',
+        url: videoUrl,
+        responseType: 'stream'
+      });
+      
+      await pipeline(videoResponse.data, fs.createWriteStream(outputFile));
+      return outputFile;
+    }
+    
+    throw new Error('Could not extract Instagram video URL');
+  } catch (error) {
+    console.error('Instagram download error:', error);
+    throw error;
+  }
+}
+
+bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
@@ -46,41 +93,32 @@ bot.on('message', (msg) => {
 
   bot.sendMessage(chatId, 'Качаю, чекай блять!');
 
-  const outputFile = path.join(os.tmpdir(), `video_${Date.now()}.mp4`);
+  try {
+    const outputFile = path.join(os.tmpdir(), `video_${Date.now()}.mp4`);
+    let downloadedFile;
 
-  const downloader = spawn('yt-dlp', ['-f', 'mp4', '-o', outputFile, text]);
-
-  downloader.on('error', (err) => {
-    console.error('Error starting yt-dlp:', err);
-    bot.sendMessage(chatId, 'Кіна не буде, блять! Якась хуйня сталась');
-  });
-
-  downloader.stderr.on('data', (data) => {
-    console.error(`yt-dlp error: ${data}`);
-  });
-
-  downloader.on('close', (code) => {
-    if (code === 0) {
-      bot.sendVideo(chatId, outputFile)
-        .then(() => {
-          fs.unlink(outputFile, (err) => {
-            if (err) console.error('Error deleting file:', err);
-          });
-        })
-        .catch((err) => {
-          console.error('Error sending video:', err);
-          bot.sendMessage(chatId, 'Кіна не буде, блять! Якась хуйня сталась');
-        });
-    } else {
-      console.error(`yt-dlp process exited with code ${code}`);
-      bot.sendMessage(chatId, 'Кіна не буде, блять! Якась хуйня сталась');
+    // Determine which platform and download accordingly
+    if (text.includes('youtube.com') || text.includes('youtu.be')) {
+      downloadedFile = await downloadYouTubeVideo(text, outputFile);
+    } else if (text.includes('tiktok.com')) {
+      downloadedFile = await downloadTikTokVideo(text, outputFile);
+    } else if (text.includes('instagram.com')) {
+      downloadedFile = await downloadInstagramVideo(text, outputFile);
     }
-  });
+
+    // Send the video to the user
+    await bot.sendVideo(chatId, downloadedFile);
+    
+    // Delete the file after sending
+    fs.unlink(downloadedFile, (err) => {
+      if (err) console.error('Error deleting file:', err);
+    });
+  } catch (error) {
+    console.error('Error downloading or sending video:', error);
+    bot.sendMessage(chatId, 'Кіна не буде, блять! Якась хуйня сталась');
+  }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is listening on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`Server is listening on port ${port}`);
 });
-
-dsadas
